@@ -14,14 +14,110 @@ from . import __version__
 def main():
     """Warhawk Toolkit - Extract and convert Warhawk PS3 game files.
 
-    A 3-stage extraction pipeline:
-
     \b
-    Stage 1: PSARC archive extraction
-    Stage 2: Warhawk container extraction (NGP + VRAM → RTT textures)
-    Stage 3: Format conversion (RTT → DDS)
+    Quick start:
+        warhawk full game.psarc -o output/
+
+    This extracts everything: files, textures (as DDS), and 3D models (as OBJ).
     """
     pass
+
+
+def _do_extract(archive: Path, output: Optional[Path], convert: bool, list_only: bool):
+    """Shared extraction logic for extract and full commands."""
+    from .psarc import PSARCReader
+
+    click.echo(f"Opening: {archive}")
+
+    with PSARCReader(archive) as reader:
+        if list_only:
+            click.echo(f"\nFiles in archive ({len(reader.entries) - 1}):")
+            for filename in reader.list_files():
+                click.echo(f"  {filename}")
+            return
+
+        if output is None:
+            output = archive.parent / f"{archive.stem}_extracted"
+
+        click.echo(f"Output:  {output}")
+        click.echo(f"Convert: {'yes' if convert else 'no'}")
+        click.echo()
+
+        # Extract all files
+        extracted_count = 0
+        converted_count = 0
+        ngp_files = []
+
+        with click.progressbar(
+            list(reader.extract_all(output)),
+            label="Extracting",
+            item_show_func=lambda x: x[0] if x else "",
+        ) as items:
+            for filename, path in items:
+                extracted_count += 1
+
+                # Track NGP files for texture extraction
+                if path.suffix.lower() == ".ngp":
+                    ngp_files.append(path)
+
+                # Auto-convert RTT files
+                if convert and path.suffix.lower() == ".rtt":
+                    converted_count += auto_convert_rtt(path)
+
+        # Extract textures and models from NGP files (after all files extracted)
+        model_count = 0
+        if convert and ngp_files:
+            click.echo()
+            click.echo("Extracting textures from NGP files...")
+            for ngp_path in ngp_files:
+                count = extract_ngp_textures(ngp_path, convert_to_dds=True)
+                if count > 0:
+                    click.echo(f"  {ngp_path.name}: {count} textures")
+                    converted_count += count
+
+            click.echo()
+            click.echo("Extracting 3D models from NGP files...")
+            for ngp_path in ngp_files:
+                count = extract_ngp_models(ngp_path, export_textures=True)
+                if count > 0:
+                    click.echo(f"  {ngp_path.name}: {count} models")
+                    model_count += count
+
+        click.echo()
+        click.echo(f"Extracted: {extracted_count} files")
+        if convert:
+            click.echo(f"Converted: {converted_count} textures")
+            click.echo(f"Models:    {model_count} models")
+
+
+@main.command()
+@click.argument("archive", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Output directory (default: <archive_name>_extracted)",
+)
+def full(archive: Path, output: Optional[Path]):
+    """Extract everything from a PSARC archive (recommended).
+
+    This is the easiest way to use Warhawk Toolkit. It does everything:
+
+    \b
+    1. Extracts all files from the PSARC archive
+    2. Extracts textures from NGP model files
+    3. Converts all textures to DDS format
+    4. Exports 3D models as OBJ files
+
+    \b
+    Example:
+        warhawk full game.psarc -o output/
+    """
+    try:
+        _do_extract(archive, output, convert=True, list_only=False)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 @main.command()
@@ -43,80 +139,18 @@ def main():
     help="List files without extracting",
 )
 def extract(archive: Path, output: Optional[Path], convert: bool, list_only: bool):
-    """Extract files from a PSARC archive.
+    """Extract files from a PSARC archive (advanced).
 
-    If --convert is enabled (default), Warhawk formats are automatically
-    processed:
+    Same as 'warhawk full' but with more options. Use --no-convert to
+    skip texture conversion, or --list-only to preview contents.
 
     \b
+    Options:
     - NGP files → Extract embedded textures from paired VRAM
     - RTT textures → DDS format
     """
-    from .psarc import PSARCReader
-
-    click.echo(f"Opening: {archive}")
-
     try:
-        with PSARCReader(archive) as reader:
-            if list_only:
-                click.echo(f"\nFiles in archive ({len(reader.entries) - 1}):")
-                for filename in reader.list_files():
-                    click.echo(f"  {filename}")
-                return
-
-            if output is None:
-                output = archive.parent / f"{archive.stem}_extracted"
-
-            click.echo(f"Output:  {output}")
-            click.echo(f"Convert: {'yes' if convert else 'no'}")
-            click.echo()
-
-            # Extract all files
-            extracted_count = 0
-            converted_count = 0
-            ngp_files = []
-
-            with click.progressbar(
-                list(reader.extract_all(output)),
-                label="Extracting",
-                item_show_func=lambda x: x[0] if x else "",
-            ) as items:
-                for filename, path in items:
-                    extracted_count += 1
-
-                    # Track NGP files for texture extraction
-                    if path.suffix.lower() == ".ngp":
-                        ngp_files.append(path)
-
-                    # Auto-convert RTT files
-                    if convert and path.suffix.lower() == ".rtt":
-                        converted_count += auto_convert_rtt(path)
-
-            # Extract textures and models from NGP files (after all files extracted)
-            model_count = 0
-            if convert and ngp_files:
-                click.echo()
-                click.echo("Extracting textures from NGP files...")
-                for ngp_path in ngp_files:
-                    count = extract_ngp_textures(ngp_path, convert_to_dds=True)
-                    if count > 0:
-                        click.echo(f"  {ngp_path.name}: {count} textures")
-                        converted_count += count
-
-                click.echo()
-                click.echo("Extracting 3D models from NGP files...")
-                for ngp_path in ngp_files:
-                    count = extract_ngp_models(ngp_path, export_textures=True)
-                    if count > 0:
-                        click.echo(f"  {ngp_path.name}: {count} models")
-                        model_count += count
-
-            click.echo()
-            click.echo(f"Extracted: {extracted_count} files")
-            if convert:
-                click.echo(f"Converted: {converted_count} textures")
-                click.echo(f"Models:    {model_count} models")
-
+        _do_extract(archive, output, convert, list_only)
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
