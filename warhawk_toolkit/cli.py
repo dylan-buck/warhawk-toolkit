@@ -16,9 +16,10 @@ def main():
 
     \b
     Quick start:
-        warhawk full game.psarc -o output/
+        warhawk full game.psarc
 
     This extracts everything: files, textures (as DDS), and 3D models (as OBJ).
+    Output goes to game_extracted/ by default.
     """
     pass
 
@@ -111,7 +112,7 @@ def full(archive: Path, output: Optional[Path]):
 
     \b
     Example:
-        warhawk full game.psarc -o output/
+        warhawk full game.psarc
     """
     try:
         _do_extract(archive, output, convert=True, list_only=False)

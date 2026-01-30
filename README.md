@@ -7,16 +7,19 @@ Extract 3D models and textures from Warhawk PS3 game files.
 ```bash
 git clone https://github.com/dylan-buck/warhawk-toolkit.git
 cd warhawk-toolkit
-pip3 install .
-warhawk full game.psarc -o output/
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
+
+warhawk full game.psarc
 ```
 
-That's it. This extracts all files, textures (as DDS), and 3D models (as OBJ) in one command.
+This extracts everything to `game_extracted/`: textures (DDS), 3D models (OBJ), and all other files.
 
 ## What You Get
 
 ```
-output/
+game_extracted/
 ├── *.dds          # Textures (viewable in most image editors)
 ├── *.obj          # 3D models (import into Blender, Maya, etc.)
 ├── *.mtl          # Material files (loaded automatically with OBJ)
@@ -25,43 +28,77 @@ output/
 
 ## Installation
 
-**Requirements:** Python 3.9+ and Git
+### macOS / Linux
 
-### 1. Install Python (if needed)
+**1. Install Python 3.9+ if you don't have it:**
 
-**macOS (Homebrew):**
 ```bash
+# macOS (Homebrew)
 brew install python
-```
 
-**macOS/Windows:** Or download from [python.org](https://www.python.org/downloads/)
-
-**Linux (Debian/Ubuntu):**
-```bash
+# Linux (Debian/Ubuntu)
 sudo apt install python3 python3-pip python3-venv
 ```
 
-### 2. Install Warhawk Toolkit
+**2. Clone and install:**
 
-```bash
-git clone https://github.com/dylan-buck/warhawk-toolkit.git
-cd warhawk-toolkit
-pip3 install .
-```
-
-**With a virtual environment (recommended):**
 ```bash
 git clone https://github.com/dylan-buck/warhawk-toolkit.git
 cd warhawk-toolkit
 python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 pip install .
 ```
 
-**For development:**
+> **Note:** The virtual environment (venv) is required on modern macOS. It keeps the toolkit isolated from your system Python.
+
+**3. Run:**
+
 ```bash
-pip install -e ".[dev]"
+warhawk full game.psarc
 ```
+
+> **Each time you open a new terminal**, activate the environment first:
+> ```bash
+> cd warhawk-toolkit
+> source .venv/bin/activate
+> ```
+
+### Windows
+
+**1. Install Python 3.9+:**
+
+Download and run the installer from [python.org](https://www.python.org/downloads/).
+
+During installation, check **"Add Python to PATH"**.
+
+**2. Install Git:**
+
+Download and run the installer from [git-scm.com](https://git-scm.com/download/win).
+
+**3. Open Command Prompt and run:**
+
+```cmd
+git clone https://github.com/dylan-buck/warhawk-toolkit.git
+cd warhawk-toolkit
+python -m venv .venv
+.venv\Scripts\activate
+pip install .
+```
+
+> **What does `pip install .` mean?** The `.` means "install from the current folder". It reads `pyproject.toml` and installs the toolkit as a command you can run.
+
+**4. Run:**
+
+```cmd
+warhawk full game.psarc
+```
+
+> **Each time you open a new Command Prompt**, activate the environment first:
+> ```cmd
+> cd warhawk-toolkit
+> .venv\Scripts\activate
+> ```
 
 ## Commands
 
@@ -94,7 +131,7 @@ warhawk extract game.psarc --no-convert
 ### Extract Models from a Single NGP File
 
 ```bash
-warhawk models model.ngp -o output/
+warhawk models model.ngp
 ```
 
 ### UV Coordinates for Chroma Skins
@@ -106,7 +143,7 @@ Warhawk models have two UV sets:
 If your custom chroma skin looks wrong in-game, you probably designed it using UV1. Export with UV2 instead:
 
 ```bash
-warhawk models --uv2 nemesis.ngp -o output/
+warhawk models --uv2 nemesis.ngp
 ```
 
 ### Diagnose UV Issues
