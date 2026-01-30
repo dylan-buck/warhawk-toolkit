@@ -138,10 +138,34 @@ Warhawk uses two distinct model formats within NGP files:
 ### UV Coordinates
 
 Models may have two UV channels:
-- **UV1**: Primary texture mapping (diffuse/albedo)
-- **UV2**: Secondary mapping for chroma/skin textures
+- **UV1** (linker `0x00080003`): Primary texture mapping (diffuse/body textures)
+- **UV2** (linker `0x000A0003`): Secondary mapping for chroma/skin textures (team colors, decals)
 
-Use the `--uv2` flag to export with UV2 coordinates when working with chroma textures.
+**Chroma Skin Misalignment**: If your custom chroma skin looks correct in Blender but appears misaligned/bleeding in-game, you likely designed it using UV1 coordinates when the game applies chroma using UV2 coordinates.
+
+**Solution**: Re-export with `--uv2` and redesign your skin using those UV coordinates:
+
+```bash
+warhawk models --uv2 nemesis.ngp -o ./output
+```
+
+### Diagnose UV Issues
+
+Use the `uv-compare` command to analyze differences between UV1 and UV2:
+
+```bash
+# Analyze UV coordinate differences
+warhawk uv-compare nemesis.ngp
+
+# Export separate OBJ files for UV1 and UV2 comparison in Blender
+warhawk uv-compare nemesis.ngp --export-both -o ./comparison
+```
+
+This diagnostic tool will show:
+- Whether both UV sets are present
+- If UV1 and UV2 are identical or different
+- Overlap percentage and coordinate differences
+- Warnings when UV sets differ significantly
 
 ## Technical Details
 

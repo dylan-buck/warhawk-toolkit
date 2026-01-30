@@ -160,7 +160,16 @@ def extract_faces(ngp_data: bytes, offset: int, index_count: int) -> List[Tuple[
 
 
 def translate_uv(val: int) -> float:
-    """Convert packed UV value to float in 0-1 range."""
+    """Convert packed UV value to float in 0-1 range.
+
+    Note: This uses a non-linear formula (power of 10) which maps:
+    - Input 0x3800 → Output 0.5
+    - Input 0x3400 → Output ~0.28
+    - Input 0x2800 → Output ~0.02
+
+    The non-linearity is significant and small input differences
+    compound dramatically, especially toward texture edges.
+    """
     return ((val / 0x3800) ** 10) / 2
 
 
@@ -380,6 +389,83 @@ def extract_model_type1(
     )
 
 
+def extract_uvs_type2(
+    ngp_data: bytes,
+    vram_data: Optional[bytes],
+    header_offset: int,
+    vertex_count: int,
+    linker_type: int = LINKER_UV1,
+) -> List[Tuple[float, float]]:
+    """Extract UV coordinates from Type 2 (Rigged Mesh) models.
+
+    Type 2 models store linkers in a different region than Type 1.
+    We search for UV linker patterns (0x00080003 for UV1, 0x000A0003 for UV2)
+    in the extended header area.
+
+    Args:
+        linker_type: LINKER_UV1 or LINKER_UV2
+        vertex_count: Number of vertices to extract UVs for
+    """
+    uvs = []
+
+    # Type 2 linkers are found in the region after the base header
+    # Search from offset +0x40 to +0x200 for linker patterns
+    search_start = header_offset + 0x40
+    search_end = min(header_offset + 0x200, len(ngp_data) - 12)
+
+    for i in range(search_start, search_end, 4):
+        if i + 12 > len(ngp_data):
+            break
+
+        current_type = struct.unpack_from(">I", ngp_data, i)[0]
+        if current_type != linker_type:
+            continue
+
+        # Found a matching linker - parse it
+        linker = ngp_data[i:i + 12]
+        repeat_length = linker[0x04]
+        is_in_ngp = linker[0x06] == 0x01
+        data_offset = struct.unpack_from(">I", linker, 0x08)[0]
+
+        # Validate
+        if repeat_length == 0 or data_offset == 0:
+            continue
+
+        # Select data source
+        if is_in_ngp:
+            source = ngp_data
+        elif vram_data is not None:
+            source = vram_data
+        else:
+            continue
+
+        # Validate data offset
+        if data_offset >= len(source):
+            continue
+
+        # Extract UVs
+        for j in range(vertex_count):
+            pos = data_offset + (j * repeat_length)
+            if pos + 4 > len(source):
+                break
+
+            u = struct.unpack_from(">H", source, pos)[0]
+            v = struct.unpack_from(">H", source, pos + 2)[0]
+
+            # Skip if we hit zeros (end of data)
+            if u == 0 and v == 0 and j > 0:
+                break
+
+            uvs.append((
+                translate_uv(u),
+                1 - translate_uv(v),  # Flip Y
+            ))
+
+        break  # Found and processed a linker
+
+    return uvs
+
+
 def extract_model_type2(
     ngp_data: bytes,
     vram_data: Optional[bytes],
@@ -392,6 +478,7 @@ def extract_model_type2(
     - Vertices stored as float32 triplets (12 bytes each) instead of int16
     - Face index count at 0x2C
     - Face offset at 0x44
+    - UV linkers located in extended header region (+0x40 to +0x200)
     """
     # Type 2 has a minimum header size
     if header_offset + 0x50 > len(ngp_data):
@@ -410,14 +497,25 @@ def extract_model_type2(
     if faces_offset < 0 or faces_offset >= len(ngp_data):
         return None
 
-    # Type 2 models use float32 vertices - extract by scanning for valid floats
-    vertices = extract_vertices_float32(ngp_data, vertex_offset)
+    # Extract faces first to determine actual vertex count from max index
+    faces = extract_faces(ngp_data, faces_offset, face_index_count)
+
+    if not faces:
+        return None
+
+    # Determine actual vertex count from face indices (more accurate than float scanning)
+    max_vertex_index = max(max(f) for f in faces)
+    actual_vertex_count = max_vertex_index  # Face indices are 1-based in OBJ
+
+    # Type 2 models use float32 vertices
+    vertices = extract_vertices_float32(ngp_data, vertex_offset, max_count=actual_vertex_count + 100)
 
     if not vertices:
         return None
 
-    # Extract faces
-    faces = extract_faces(ngp_data, faces_offset, face_index_count)
+    # Trim vertices to actual count needed
+    if len(vertices) > actual_vertex_count:
+        vertices = vertices[:actual_vertex_count]
 
     # Filter out faces that reference out-of-bounds vertices
     vertex_count = len(vertices)
@@ -429,8 +527,12 @@ def extract_model_type2(
     if not valid_faces:
         return None
 
-    # Type 2 may have different linker structure - for now return without UVs/normals
-    # The linkers may be at a different offset in Type 2 headers
+    # Extract UVs from Type 2 linker structure
+    # Type 2 rigged meshes typically use UV1 for texture mapping (including chroma)
+    uvs = extract_uvs_type2(ngp_data, vram_data, header_offset, vertex_count, LINKER_UV1)
+
+    # Also try to extract UV2 if present
+    uvs2 = extract_uvs_type2(ngp_data, vram_data, header_offset, vertex_count, LINKER_UV2)
 
     # Find associated texture
     texture_offset = find_texture_header(ngp_data, header_offset)
@@ -439,9 +541,9 @@ def extract_model_type2(
         header_offset=header_offset,
         vertices=vertices,
         faces=valid_faces,
-        uvs=[],
-        normals=[],
-        uvs2=[],
+        uvs=uvs,
+        normals=[],  # Type 2 normals have different format, not yet implemented
+        uvs2=uvs2,
         texture_header_offset=texture_offset,
         model_type=2,
     )
@@ -586,6 +688,54 @@ def build_rtt_from_header(
     rtt_header[4:16] = header_copy
 
     return bytes(rtt_header) + texture_data
+
+
+def analyze_uv_differences(model: NGPModel) -> dict:
+    """Analyze differences between UV1 and UV2 coordinate sets.
+
+    Returns a dictionary with analysis results useful for diagnosing
+    chroma skin misalignment issues.
+    """
+    result = {
+        "uv1_count": len(model.uvs),
+        "uv2_count": len(model.uvs2),
+        "uv1_present": bool(model.uvs),
+        "uv2_present": bool(model.uvs2),
+        "identical": False,
+        "avg_difference": 0.0,
+        "max_difference": 0.0,
+        "different_coords_count": 0,
+        "overlap_percentage": 0.0,
+    }
+
+    if not model.uvs or not model.uvs2:
+        return result
+
+    if len(model.uvs) != len(model.uvs2):
+        result["different_coords_count"] = abs(len(model.uvs) - len(model.uvs2))
+        return result
+
+    # Compare UV coordinates
+    total_diff = 0.0
+    max_diff = 0.0
+    different_count = 0
+    threshold = 0.001  # Coordinates within this are considered "same"
+
+    for (u1, v1), (u2, v2) in zip(model.uvs, model.uvs2):
+        diff = ((u1 - u2) ** 2 + (v1 - v2) ** 2) ** 0.5
+        total_diff += diff
+        max_diff = max(max_diff, diff)
+        if diff > threshold:
+            different_count += 1
+
+    count = len(model.uvs)
+    result["avg_difference"] = total_diff / count if count > 0 else 0.0
+    result["max_difference"] = max_diff
+    result["different_coords_count"] = different_count
+    result["overlap_percentage"] = ((count - different_count) / count * 100) if count > 0 else 0.0
+    result["identical"] = different_count == 0
+
+    return result
 
 
 def extract_models_from_ngp(

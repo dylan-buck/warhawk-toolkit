@@ -258,14 +258,33 @@ def models(ngp_file: Path, vram: Optional[Path], output: Optional[Path], texture
     - UV1 (body texture) and UV2 (chroma/skin) coordinates
     - Automatic texture extraction
 
+    \b
+    UV Coordinate Sets:
+    - UV1 (default): For diffuse/body textures
+    - UV2 (--uv2):   For chroma/skin textures (team colors, decals)
+
+    If your chroma skin appears misaligned in-game, you likely designed
+    it using UV1 coordinates. Re-export with --uv2 and redesign using
+    those UV coordinates.
+
     If --vram is not specified, looks for a .vram file with the same name.
-    Use --uv2 to export with chroma/skin UV coordinates instead of body UVs.
+    Use 'warhawk uv-compare' to analyze UV differences before designing skins.
     """
     from .converters import extract_models_from_ngp
 
     click.echo(f"Loading: {ngp_file}")
     if uv2:
         click.echo("UV mode: UV2 (chroma/skin)")
+        click.echo()
+        click.echo("NOTE: Using UV2 coordinates for chroma/skin texture mapping.")
+        click.echo("      Design your chroma texture using these UV coordinates.")
+    else:
+        click.echo("UV mode: UV1 (body/diffuse)")
+        click.echo()
+        click.echo("TIP: For chroma skins, use --uv2 flag instead:")
+        click.echo(f"     warhawk models --uv2 {ngp_file.name}")
+
+    click.echo()
 
     try:
         if output is None:
@@ -290,6 +309,154 @@ def models(ngp_file: Path, vram: Optional[Path], output: Optional[Path], texture
 
         click.echo()
         click.echo(f"Extracted {model_count} models ({static_count} static, {rigged_count} rigged)")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("uv-compare")
+@click.argument("ngp_file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--vram",
+    type=click.Path(exists=True, path_type=Path),
+    help="VRAM texture file (auto-detected if not specified)",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(path_type=Path),
+    help="Output directory for comparison OBJ files",
+)
+@click.option(
+    "--export-both",
+    is_flag=True,
+    help="Export separate OBJ files for UV1 and UV2 comparison in Blender",
+)
+def uv_compare(ngp_file: Path, vram: Optional[Path], output: Optional[Path], export_both: bool):
+    """Analyze UV coordinate differences between UV1 and UV2.
+
+    This diagnostic tool helps identify chroma skin misalignment issues
+    by comparing the two UV coordinate sets used in Warhawk models:
+
+    \b
+    - UV1 (linker 0x00080003): Used for diffuse/body textures
+    - UV2 (linker 0x000A0003): Used for chroma/skin textures
+
+    \b
+    Common issue: Designing chroma textures using UV1 coordinates in
+    Blender, when the game actually applies chroma using UV2 coordinates.
+
+    Use --export-both to generate separate OBJ files for each UV set,
+    allowing side-by-side comparison in Blender.
+    """
+    from .converters.ngp_to_obj import (
+        NGPModel,
+        analyze_uv_differences,
+        extract_model,
+        find_models,
+        write_obj,
+    )
+
+    click.echo(f"Loading: {ngp_file}")
+    click.echo()
+
+    try:
+        ngp_data = ngp_file.read_bytes()
+
+        vram_data = None
+        if vram and Path(vram).exists():
+            vram_data = Path(vram).read_bytes()
+        else:
+            auto_vram = ngp_file.with_suffix(".vram")
+            if auto_vram.exists():
+                vram_data = auto_vram.read_bytes()
+                click.echo(f"Using VRAM: {auto_vram.name}")
+
+        if output is None:
+            output = ngp_file.parent
+        output = Path(output)
+        output.mkdir(parents=True, exist_ok=True)
+
+        click.echo("=" * 60)
+        click.echo("UV COORDINATE ANALYSIS")
+        click.echo("=" * 60)
+        click.echo()
+
+        model_count = 0
+        for header_offset, header_length, model_type in find_models(ngp_data):
+            model = extract_model(ngp_data, vram_data, header_offset, model_type)
+            if model is None or not model.vertices:
+                continue
+
+            model_count += 1
+            type_str = "Static" if model_type == 1 else "Rigged"
+
+            click.echo(f"Model #{model_count}: 0x{header_offset:X} ({type_str})")
+            click.echo(f"  Vertices: {len(model.vertices)}")
+            click.echo(f"  Faces:    {len(model.faces)}")
+
+            analysis = analyze_uv_differences(model)
+
+            click.echo(f"  UV1 coords: {analysis['uv1_count']}")
+            click.echo(f"  UV2 coords: {analysis['uv2_count']}")
+
+            if not analysis['uv1_present']:
+                click.echo("  ⚠ UV1 NOT PRESENT - model has no diffuse UV mapping")
+            if not analysis['uv2_present']:
+                click.echo("  ⚠ UV2 NOT PRESENT - model has no chroma UV mapping")
+                click.echo("    (Chroma textures cannot be applied to this model)")
+
+            if analysis['uv1_present'] and analysis['uv2_present']:
+                if analysis['identical']:
+                    click.echo("  ✓ UV1 and UV2 are IDENTICAL")
+                    click.echo("    (Chroma and diffuse share same UV layout)")
+                else:
+                    click.echo(f"  ✗ UV1 and UV2 are DIFFERENT")
+                    click.echo(f"    Overlap:        {analysis['overlap_percentage']:.1f}%")
+                    click.echo(f"    Avg difference: {analysis['avg_difference']:.4f}")
+                    click.echo(f"    Max difference: {analysis['max_difference']:.4f}")
+                    click.echo(f"    Different coords: {analysis['different_coords_count']}")
+                    click.echo()
+                    click.echo("    ⚠ WARNING: If you designed your chroma texture using UV1")
+                    click.echo("      coordinates, it will appear misaligned in-game!")
+                    click.echo("      Re-export with: warhawk models --uv2 <file>")
+
+            click.echo()
+
+            # Export comparison OBJ files if requested
+            if export_both and model.vertices and model.faces:
+                base_name = ngp_file.stem
+                model_name = f"{base_name}_0x{header_offset:x}"
+
+                if model.uvs:
+                    uv1_path = output / f"{model_name}_UV1.obj"
+                    write_obj(model, uv1_path, None, use_uv2=False)
+                    click.echo(f"  Exported UV1: {uv1_path.name}")
+
+                if model.uvs2:
+                    uv2_path = output / f"{model_name}_UV2.obj"
+                    write_obj(model, uv2_path, None, use_uv2=True)
+                    click.echo(f"  Exported UV2: {uv2_path.name}")
+
+                if model.uvs and model.uvs2:
+                    click.echo("    → Import both into Blender to compare UV layouts")
+
+                click.echo()
+
+        if model_count == 0:
+            click.echo("No models found in NGP file.")
+        else:
+            click.echo("=" * 60)
+            click.echo("RECOMMENDATION")
+            click.echo("=" * 60)
+            click.echo()
+            click.echo("For chroma/skin textures, ALWAYS use UV2 coordinates:")
+            click.echo()
+            click.echo("  warhawk models --uv2 <ngp_file> -o ./output")
+            click.echo()
+            click.echo("Then design your chroma texture in Blender using the")
+            click.echo("UV2 layout from the exported OBJ file.")
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
