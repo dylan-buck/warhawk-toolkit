@@ -5,10 +5,9 @@ Extract 3D models and textures from Warhawk PS3 game files.
 ## Quick Start
 
 ```bash
-# Install
-pip install .
-
-# Extract everything from a PSARC archive
+git clone https://github.com/dylan-buck/warhawk-toolkit.git
+cd warhawk-toolkit
+pip3 install .
 warhawk full game.psarc -o output/
 ```
 
@@ -26,13 +25,41 @@ output/
 
 ## Installation
 
-**Requirements:** Python 3.9+
+**Requirements:** Python 3.9+ and Git
+
+### 1. Install Python (if needed)
+
+**macOS (Homebrew):**
+```bash
+brew install python
+```
+
+**macOS/Windows:** Or download from [python.org](https://www.python.org/downloads/)
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt install python3 python3-pip python3-venv
+```
+
+### 2. Install Warhawk Toolkit
 
 ```bash
-# Standard install
-pip install .
+git clone https://github.com/dylan-buck/warhawk-toolkit.git
+cd warhawk-toolkit
+pip3 install .
+```
 
-# Development install
+**With a virtual environment (recommended):**
+```bash
+git clone https://github.com/dylan-buck/warhawk-toolkit.git
+cd warhawk-toolkit
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install .
+```
+
+**For development:**
+```bash
 pip install -e ".[dev]"
 ```
 
