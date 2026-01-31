@@ -325,22 +325,41 @@ def models(ngp_file: Path, vram: Optional[Path], output: Optional[Path], texture
         if output is None:
             output = ngp_file.parent
 
+        # Pre-count models for progress reporting
+        from .converters.ngp_to_obj import count_models_in_ngp
+        ngp_data = ngp_file.read_bytes()
+        type1_count, type2_count = count_models_in_ngp(ngp_data)
+        total_models = type1_count + type2_count
+
+        # Show progress for large files (1000+ models)
+        show_progress = total_models >= 1000
+        last_progress = [0]  # Use list to allow modification in closure
+
+        def progress_callback(current: int, total: int) -> None:
+            if show_progress and current % 100 == 0:
+                click.echo(f"  Processing model {current}/{total}...")
+
+        if show_progress:
+            click.echo(f"Found {total_models} models, extracting...")
+
         model_count = 0
         static_count = 0
         rigged_count = 0
         for obj_path, mtl_path, dds_path in extract_models_from_ngp(
-            ngp_file, output, vram, export_textures=textures, use_uv2=uv2
+            ngp_file, output, vram, export_textures=textures, use_uv2=uv2,
+            progress_callback=progress_callback if show_progress else None
         ):
             model_count += 1
             if "_static" in obj_path.name:
                 static_count += 1
             elif "_rigged" in obj_path.name:
                 rigged_count += 1
-            click.echo(f"Extracted: {obj_path.name}")
-            if mtl_path:
-                click.echo(f"  Material: {mtl_path.name}")
-            if dds_path:
-                click.echo(f"  Texture:  {dds_path.name}")
+            if not show_progress:
+                click.echo(f"Extracted: {obj_path.name}")
+                if mtl_path:
+                    click.echo(f"  Material: {mtl_path.name}")
+                if dds_path:
+                    click.echo(f"  Texture:  {dds_path.name}")
 
         click.echo()
         click.echo(f"Extracted {model_count} models ({static_count} static, {rigged_count} rigged)")
@@ -348,6 +367,121 @@ def models(ngp_file: Path, vram: Optional[Path], output: Optional[Path], texture
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--recursive", "-r",
+    is_flag=True,
+    help="Recursively scan directories for NGP files",
+)
+@click.option(
+    "--json", "json_output",
+    is_flag=True,
+    help="Output results as JSON",
+)
+def audit(path: Path, recursive: bool, json_output: bool):
+    """Audit NGP files and report extraction statistics.
+
+    Scans NGP files and reports:
+    - Model counts (Type 1 static, Type 2 rigged)
+    - Texture counts
+    - UV/normal coverage
+    - Extraction success rates
+
+    \b
+    Examples:
+        warhawk audit file.ngp              # Audit single file
+        warhawk audit ./extracted -r        # Audit all NGPs recursively
+        warhawk audit ./extracted -r --json # JSON output for comparison
+    """
+    import json as json_module
+    from .converters.ngp_to_obj import get_ngp_extraction_stats
+
+    # Find NGP files
+    if path.is_file():
+        ngp_files = [path] if path.suffix.lower() == ".ngp" else []
+    elif recursive:
+        ngp_files = sorted(path.rglob("*.ngp"))
+    else:
+        ngp_files = sorted(path.glob("*.ngp"))
+
+    if not ngp_files:
+        click.echo("No NGP files found.", err=True)
+        sys.exit(1)
+
+    results = {}
+    totals = {
+        "type1_found": 0,
+        "type2_found": 0,
+        "type1_extracted": 0,
+        "type2_extracted": 0,
+        "textures_found": 0,
+        "textures_extracted": 0,
+        "models_with_uvs": 0,
+        "models_with_normals": 0,
+        "models_with_uv2": 0,
+        "files_scanned": 0,
+    }
+
+    if not json_output:
+        click.echo(f"Scanning {len(ngp_files)} NGP file(s)...")
+        click.echo()
+
+    for ngp_path in ngp_files:
+        try:
+            stats = get_ngp_extraction_stats(ngp_path)
+            results[str(ngp_path)] = stats.to_dict()
+
+            # Accumulate totals
+            totals["type1_found"] += stats.type1_found
+            totals["type2_found"] += stats.type2_found
+            totals["type1_extracted"] += stats.type1_extracted
+            totals["type2_extracted"] += stats.type2_extracted
+            totals["textures_found"] += stats.textures_found
+            totals["textures_extracted"] += stats.textures_extracted
+            totals["models_with_uvs"] += stats.models_with_uvs
+            totals["models_with_normals"] += stats.models_with_normals
+            totals["models_with_uv2"] += stats.models_with_uv2
+            totals["files_scanned"] += 1
+
+            if not json_output:
+                rel_path = ngp_path.relative_to(path) if path.is_dir() else ngp_path.name
+                click.echo(f"{rel_path}:")
+                click.echo(f"  Models: {stats.total_found} found, {stats.total_extracted} extracted")
+                click.echo(f"    Type 1 (static):  {stats.type1_found} found, {stats.type1_extracted} extracted")
+                click.echo(f"    Type 2 (rigged):  {stats.type2_found} found, {stats.type2_extracted} extracted")
+                click.echo(f"  Textures: {stats.textures_found} found, {stats.textures_extracted} extractable")
+                click.echo(f"  Coverage: {stats.models_with_uvs} with UVs, {stats.models_with_normals} with normals, {stats.models_with_uv2} with UV2")
+                if stats.extraction_errors:
+                    click.echo(f"  Errors: {len(stats.extraction_errors)}")
+                click.echo()
+
+        except Exception as e:
+            results[str(ngp_path)] = {"error": str(e)}
+            if not json_output:
+                click.echo(f"{ngp_path}: Error - {e}", err=True)
+
+    if json_output:
+        output = {
+            "files": results,
+            "totals": totals,
+        }
+        click.echo(json_module.dumps(output, indent=2))
+    else:
+        # Print summary
+        click.echo("=" * 60)
+        click.echo("SUMMARY")
+        click.echo("=" * 60)
+        click.echo(f"Files scanned:     {totals['files_scanned']}")
+        click.echo(f"Total models:      {totals['type1_found'] + totals['type2_found']} found, {totals['type1_extracted'] + totals['type2_extracted']} extracted")
+        click.echo(f"  Type 1 (static): {totals['type1_found']} found, {totals['type1_extracted']} extracted")
+        click.echo(f"  Type 2 (rigged): {totals['type2_found']} found, {totals['type2_extracted']} extracted")
+        click.echo(f"Total textures:    {totals['textures_found']} found, {totals['textures_extracted']} extractable")
+        click.echo(f"UV coverage:       {totals['models_with_uvs']} models with UVs")
+        click.echo(f"Normal coverage:   {totals['models_with_normals']} models with normals")
+        click.echo(f"UV2 coverage:      {totals['models_with_uv2']} models with UV2 (chroma)")
 
 
 @main.command("uv-compare")

@@ -5,11 +5,51 @@ with optional MTL materials and DDS textures.
 """
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Callable, Iterator, List, Optional, Tuple
 
 from .rtt_to_dds import convert_rtt_to_dds
+
+
+@dataclass
+class NGPExtractionStats:
+    """Statistics from NGP model extraction."""
+
+    type1_found: int = 0
+    type2_found: int = 0
+    type1_extracted: int = 0
+    type2_extracted: int = 0
+    textures_found: int = 0
+    textures_extracted: int = 0
+    models_with_uvs: int = 0
+    models_with_normals: int = 0
+    models_with_uv2: int = 0
+    extraction_errors: List[str] = field(default_factory=list)
+
+    @property
+    def total_found(self) -> int:
+        return self.type1_found + self.type2_found
+
+    @property
+    def total_extracted(self) -> int:
+        return self.type1_extracted + self.type2_extracted
+
+    def to_dict(self) -> dict:
+        return {
+            "type1_found": self.type1_found,
+            "type2_found": self.type2_found,
+            "type1_extracted": self.type1_extracted,
+            "type2_extracted": self.type2_extracted,
+            "total_found": self.total_found,
+            "total_extracted": self.total_extracted,
+            "textures_found": self.textures_found,
+            "textures_extracted": self.textures_extracted,
+            "models_with_uvs": self.models_with_uvs,
+            "models_with_normals": self.models_with_normals,
+            "models_with_uv2": self.models_with_uv2,
+            "extraction_errors": self.extraction_errors,
+        }
 
 
 @dataclass
@@ -105,7 +145,7 @@ def extract_vertices(ngp_data: bytes, offset: int, count: int) -> List[Tuple[flo
     return vertices
 
 
-def extract_vertices_float32(ngp_data: bytes, offset: int, max_count: int = 10000) -> List[Tuple[float, float, float]]:
+def extract_vertices_float32(ngp_data: bytes, offset: int, max_count: int = 20000) -> List[Tuple[float, float, float]]:
     """Extract vertex positions stored as float32 triplets.
 
     Used for Type 2 (Rigged Mesh) models which store vertices as 3 big-endian
@@ -389,6 +429,38 @@ def extract_model_type1(
     )
 
 
+def find_type2_linker_boundary(ngp_data: bytes, header_offset: int) -> int:
+    """Find the boundary of the Type 2 linker search region.
+
+    Scans forward from the header until hitting:
+    - Next model magic (0x00000001 or 0x00000002)
+    - Maximum search distance (0x1000 = 4KB)
+    - End of data
+
+    Returns the offset where the search should stop.
+    """
+    max_search = 0x1000  # 4KB max search window
+    search_start = header_offset + 0x50  # After base Type 2 header
+    search_end = min(header_offset + max_search, len(ngp_data) - 4)
+
+    for i in range(search_start, search_end, 4):
+        # Check for next model header magic
+        magic = ngp_data[i:i + 4]
+        if magic == b'\x00\x00\x00\x01' or magic == b'\x00\x00\x00\x02':
+            # Verify this looks like a real header (not just coincidental bytes)
+            # Type 1: check for 0x3C000000 at +0x14
+            if magic == b'\x00\x00\x00\x01' and i + 0x18 <= len(ngp_data):
+                if ngp_data[i + 0x14:i + 0x18] == b'\x3C\x00\x00\x00':
+                    return i
+            # Type 2: check for valid face offset at +0x44
+            elif magic == b'\x00\x00\x00\x02' and i + 0x48 <= len(ngp_data):
+                face_offset = struct.unpack_from(">I", ngp_data, i + 0x44)[0]
+                if 0 < face_offset < len(ngp_data):
+                    return i
+
+    return search_end
+
+
 def extract_uvs_type2(
     ngp_data: bytes,
     vram_data: Optional[bytes],
@@ -400,7 +472,7 @@ def extract_uvs_type2(
 
     Type 2 models store linkers in a different region than Type 1.
     We search for UV linker patterns (0x00080003 for UV1, 0x000A0003 for UV2)
-    in the extended header area.
+    in the extended header area, using dynamic boundary detection.
 
     Args:
         linker_type: LINKER_UV1 or LINKER_UV2
@@ -409,9 +481,9 @@ def extract_uvs_type2(
     uvs = []
 
     # Type 2 linkers are found in the region after the base header
-    # Search from offset +0x40 to +0x200 for linker patterns
+    # Use dynamic boundary detection instead of fixed 0x200 limit
     search_start = header_offset + 0x40
-    search_end = min(header_offset + 0x200, len(ngp_data) - 12)
+    search_end = find_type2_linker_boundary(ngp_data, header_offset)
 
     for i in range(search_start, search_end, 4):
         if i + 12 > len(ngp_data):
@@ -466,6 +538,126 @@ def extract_uvs_type2(
     return uvs
 
 
+def extract_normals_type2(
+    ngp_data: bytes,
+    vram_data: Optional[bytes],
+    header_offset: int,
+    vertex_count: int,
+) -> List[Tuple[float, float, float]]:
+    """Extract vertex normals from Type 2 (Rigged Mesh) models.
+
+    Searches the extended header region for normal linker (0x00020004)
+    and parses float32 triplets from the data source.
+    """
+    normals = []
+
+    # Use dynamic boundary detection
+    search_start = header_offset + 0x40
+    search_end = find_type2_linker_boundary(ngp_data, header_offset)
+
+    for i in range(search_start, search_end, 4):
+        if i + 12 > len(ngp_data):
+            break
+
+        current_type = struct.unpack_from(">I", ngp_data, i)[0]
+        if current_type != LINKER_NORMALS:
+            continue
+
+        # Found a matching linker - parse it
+        linker = ngp_data[i:i + 12]
+        repeat_length = linker[0x04]
+        is_in_ngp = linker[0x06] == 0x01
+        data_offset = struct.unpack_from(">I", linker, 0x08)[0]
+
+        # Validate
+        if repeat_length == 0 or data_offset == 0:
+            continue
+
+        # Select data source
+        if is_in_ngp:
+            source = ngp_data
+        elif vram_data is not None:
+            source = vram_data
+        else:
+            continue
+
+        # Validate data offset
+        if data_offset >= len(source):
+            continue
+
+        # Extract normals as float32 triplets
+        for j in range(vertex_count):
+            pos = data_offset + (j * repeat_length)
+            if pos + 12 > len(source):
+                break
+
+            nx = struct.unpack_from(">f", source, pos)[0]
+            ny = struct.unpack_from(">f", source, pos + 4)[0]
+            nz = struct.unpack_from(">f", source, pos + 8)[0]
+
+            # Validate normals (should be unit vectors, allow some tolerance)
+            if nx != nx or ny != ny or nz != nz:  # NaN check
+                break
+            if abs(nx) > 2 or abs(ny) > 2 or abs(nz) > 2:
+                break
+
+            normals.append((nx, ny, nz))
+
+        break  # Found and processed a linker
+
+    return normals
+
+
+def detect_type2_vertex_count(
+    ngp_data: bytes,
+    vertex_offset: int,
+    max_face_index: int,
+    max_count: int = 20000,
+) -> int:
+    """Detect the actual vertex count for Type 2 models.
+
+    Uses multiple validation methods:
+    1. Max face index (from faces already parsed)
+    2. Float32 validity scanning (detect NaN/out-of-range)
+
+    Returns the most reliable vertex count estimate.
+    """
+    # Method 1: Use max face index as baseline
+    baseline = max_face_index
+
+    # Method 2: Scan for valid float32 vertices
+    data_len = len(ngp_data)
+    scanned_count = 0
+
+    for i in range(max_count):
+        pos = vertex_offset + (i * 12)
+        if pos + 12 > data_len:
+            break
+
+        x = struct.unpack_from(">f", ngp_data, pos)[0]
+        y = struct.unpack_from(">f", ngp_data, pos + 4)[0]
+        z = struct.unpack_from(">f", ngp_data, pos + 8)[0]
+
+        # Check for valid float values
+        if x != x or y != y or z != z:  # NaN check
+            break
+        if abs(x) > 100 or abs(y) > 100 or abs(z) > 100:
+            break
+
+        scanned_count += 1
+
+    # Cross-validate: use the larger of the two if they're close,
+    # otherwise prefer max face index (more reliable)
+    if scanned_count >= baseline:
+        return scanned_count
+    elif scanned_count >= baseline * 0.9:
+        # Within 10% - use face index as it's authoritative
+        return baseline
+    else:
+        # Significant mismatch - use face index but cap at scanned
+        return min(baseline, scanned_count) if scanned_count > 0 else baseline
+
+
 def extract_model_type2(
     ngp_data: bytes,
     vram_data: Optional[bytes],
@@ -478,7 +670,7 @@ def extract_model_type2(
     - Vertices stored as float32 triplets (12 bytes each) instead of int16
     - Face index count at 0x2C
     - Face offset at 0x44
-    - UV linkers located in extended header region (+0x40 to +0x200)
+    - UV/normal linkers located in extended header region (+0x40 to +0x1000)
     """
     # Type 2 has a minimum header size
     if header_offset + 0x50 > len(ngp_data):
@@ -503,9 +695,11 @@ def extract_model_type2(
     if not faces:
         return None
 
-    # Determine actual vertex count from face indices (more accurate than float scanning)
+    # Determine actual vertex count using improved detection
     max_vertex_index = max(max(f) for f in faces)
-    actual_vertex_count = max_vertex_index  # Face indices are 1-based in OBJ
+    actual_vertex_count = detect_type2_vertex_count(
+        ngp_data, vertex_offset, max_vertex_index
+    )
 
     # Type 2 models use float32 vertices
     vertices = extract_vertices_float32(ngp_data, vertex_offset, max_count=actual_vertex_count + 100)
@@ -534,6 +728,9 @@ def extract_model_type2(
     # Also try to extract UV2 if present
     uvs2 = extract_uvs_type2(ngp_data, vram_data, header_offset, vertex_count, LINKER_UV2)
 
+    # Extract normals using the new Type 2 normals function
+    normals = extract_normals_type2(ngp_data, vram_data, header_offset, vertex_count)
+
     # Find associated texture
     texture_offset = find_texture_header(ngp_data, header_offset)
 
@@ -542,7 +739,7 @@ def extract_model_type2(
         vertices=vertices,
         faces=valid_faces,
         uvs=uvs,
-        normals=[],  # Type 2 normals have different format, not yet implemented
+        normals=normals,
         uvs2=uvs2,
         texture_header_offset=texture_offset,
         model_type=2,
@@ -738,17 +935,96 @@ def analyze_uv_differences(model: NGPModel) -> dict:
     return result
 
 
+def count_models_in_ngp(ngp_data: bytes) -> Tuple[int, int]:
+    """Count Type 1 and Type 2 models in NGP data without full extraction.
+
+    Returns (type1_count, type2_count).
+    """
+    type1_count = 0
+    type2_count = 0
+
+    for _, _, model_type in find_models(ngp_data):
+        if model_type == 1:
+            type1_count += 1
+        else:
+            type2_count += 1
+
+    return type1_count, type2_count
+
+
+def get_ngp_extraction_stats(
+    ngp_path: Path,
+    vram_path: Optional[Path] = None,
+) -> NGPExtractionStats:
+    """Get extraction statistics for an NGP file without writing output files.
+
+    Analyzes the NGP file and returns statistics about what can be extracted.
+    """
+    stats = NGPExtractionStats()
+
+    ngp_path = Path(ngp_path)
+    ngp_data = ngp_path.read_bytes()
+
+    vram_data = None
+    if vram_path and Path(vram_path).exists():
+        vram_data = Path(vram_path).read_bytes()
+    else:
+        auto_vram = ngp_path.with_suffix(".vram")
+        if auto_vram.exists():
+            vram_data = auto_vram.read_bytes()
+
+    # Count textures from NGP format parser
+    try:
+        from ..formats.ngp import NGPFile
+        ngp_file = NGPFile.from_bytes(ngp_data, vram_data)
+        stats.textures_found = ngp_file.texture_count
+        # Count extractable textures
+        for i in range(ngp_file.texture_count):
+            if ngp_file.get_texture_data(i) is not None:
+                stats.textures_extracted += 1
+    except Exception as e:
+        stats.extraction_errors.append(f"Texture parsing error: {e}")
+
+    # Find and analyze all models
+    for header_offset, header_length, model_type in find_models(ngp_data):
+        if model_type == 1:
+            stats.type1_found += 1
+        else:
+            stats.type2_found += 1
+
+        try:
+            model = extract_model(ngp_data, vram_data, header_offset, model_type)
+            if model is not None and model.vertices and model.faces:
+                if model_type == 1:
+                    stats.type1_extracted += 1
+                else:
+                    stats.type2_extracted += 1
+
+                if model.uvs:
+                    stats.models_with_uvs += 1
+                if model.normals:
+                    stats.models_with_normals += 1
+                if model.uvs2:
+                    stats.models_with_uv2 += 1
+        except Exception as e:
+            stats.extraction_errors.append(f"Model 0x{header_offset:x}: {e}")
+
+    return stats
+
+
 def extract_models_from_ngp(
     ngp_path: Path,
     output_dir: Optional[Path] = None,
     vram_path: Optional[Path] = None,
     export_textures: bool = True,
     use_uv2: bool = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Iterator[Tuple[Path, Optional[Path], Optional[Path]]]:
     """Extract all models from an NGP file.
 
     Args:
         use_uv2: If True and UV2 is available, use UV2 (chroma) instead of UV1
+        progress_callback: Optional callback(current, total) for progress reporting
 
     Yields (obj_path, mtl_path, dds_path) for each model.
     """
@@ -772,8 +1048,16 @@ def extract_models_from_ngp(
 
     base_name = ngp_path.stem
 
+    # Pre-count models for progress reporting
+    model_headers = list(find_models(ngp_data))
+    total_models = len(model_headers)
+
     # Find and extract all models (Type 1 and Type 2)
-    for header_offset, header_length, model_type in find_models(ngp_data):
+    for idx, (header_offset, header_length, model_type) in enumerate(model_headers):
+        # Report progress
+        if progress_callback is not None:
+            progress_callback(idx + 1, total_models)
+
         model = extract_model(ngp_data, vram_data, header_offset, model_type)
         if model is None or not model.vertices or not model.faces:
             continue
