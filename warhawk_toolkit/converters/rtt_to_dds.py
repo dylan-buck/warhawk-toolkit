@@ -74,7 +74,7 @@ def swap_dxt_endian(data: bytes, compression_type: int) -> bytes:
     DXT3/DXT5: 16-byte blocks (8-byte alpha + 8-byte color)
     """
     result = bytearray(len(data))
-    is_dxt1 = compression_type == 0x86
+    is_dxt1 = compression_type == 0x06  # Was 0x86
     block_size = 8 if is_dxt1 else 16
 
     offset = 0
@@ -133,7 +133,7 @@ def swap_alpha_block(block: bytes, compression_type: int) -> bytes:
     if len(block) < 8:
         return block
 
-    is_dxt3 = compression_type == 0x87
+    is_dxt3 = compression_type == 0x07  # Was 0x87
 
     if is_dxt3:
         # DXT3: swap pairs of bytes for 16-bit alpha values

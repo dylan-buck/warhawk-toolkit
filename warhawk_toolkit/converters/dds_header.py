@@ -184,10 +184,13 @@ def create_rgba_header(
 
 
 def get_dds_fourcc(compression_type: int) -> Optional[bytes]:
-    """Map RTT compression type to DDS FourCC."""
+    """Map RTT compression type to DDS FourCC.
+
+    Note: Actual game files use 0x06-0x08, not 0x86-0x88 as previously assumed.
+    """
     mapping = {
-        0x86: b"DXT1",
-        0x87: b"DXT3",
-        0x88: b"DXT5",
+        0x06: b"DXT1",
+        0x07: b"DXT3",
+        0x08: b"DXT5",
     }
     return mapping.get(compression_type)

@@ -59,16 +59,20 @@ class TestDDSFourCC:
     """Tests for FourCC mapping."""
 
     def test_dxt1_fourcc(self):
-        assert get_dds_fourcc(0x86) == b"DXT1"
+        assert get_dds_fourcc(0x06) == b"DXT1"  # Changed from 0x86
 
     def test_dxt3_fourcc(self):
-        assert get_dds_fourcc(0x87) == b"DXT3"
+        assert get_dds_fourcc(0x07) == b"DXT3"  # Changed from 0x87
 
     def test_dxt5_fourcc(self):
-        assert get_dds_fourcc(0x88) == b"DXT5"
+        assert get_dds_fourcc(0x08) == b"DXT5"  # Changed from 0x88
 
     def test_unknown_fourcc(self):
         assert get_dds_fourcc(0x99) is None
+        # Old codes should now return None
+        assert get_dds_fourcc(0x86) is None
+        assert get_dds_fourcc(0x87) is None
+        assert get_dds_fourcc(0x88) is None
 
 
 class TestEndianSwap:

@@ -215,7 +215,19 @@ class NGPFile:
             ]
 
     def build_rtt_data(self, index: int) -> Optional[bytes]:
-        """Build a complete RTT file from texture header and data."""
+        """Build a complete RTT file from texture header and data.
+
+        RTT header layout (128 bytes):
+        - Byte 0: 0x80 (magic)
+        - Bytes 1-3: size minus 4 (big-endian, 3 bytes)
+        - Byte 4: compression_method
+        - Bytes 5-7: padding
+        - Bytes 8-9: width (big-endian)
+        - Bytes 10-11: height (big-endian)
+        - Byte 12: depth (usually 1)
+        - Byte 13: mipmap count  <-- CRITICAL: must be at byte 13!
+        - Bytes 14-127: padding
+        """
         if index < 0 or index >= len(self._texture_headers):
             return None
 
@@ -225,29 +237,37 @@ class NGPFile:
         if texture_data is None:
             return None
 
-        # Build RTT header (128 bytes)
-        # Byte 0: 0x80 (magic)
-        # Bytes 1-3: size minus 4 (big-endian, 3 bytes)
-        # Bytes 4-15: first 12 bytes of texture header
-        # Bytes 16-127: padding
-
         rtt_size = 0x80 + len(texture_data)
 
         rtt_header = bytearray(0x80)
+
+        # Byte 0: Magic
         rtt_header[0] = 0x80
 
-        # Size field (bytes 1-3)
+        # Bytes 1-3: Size field (size minus 4, big-endian)
         size_minus_4 = rtt_size - 4
         rtt_header[1] = (size_minus_4 >> 16) & 0xFF
         rtt_header[2] = (size_minus_4 >> 8) & 0xFF
         rtt_header[3] = size_minus_4 & 0xFF
 
-        # Copy texture header bytes (first 12 bytes, but set data_in_ngp to 0)
-        header_bytes = self._data[header.header_offset : header.header_offset + 0x0C]
-        header_bytes = bytearray(header_bytes)
-        header_bytes[0x08] = 0x00  # Clear data_in_ngp flag for standalone RTT
+        # Byte 4: Compression method
+        rtt_header[4] = header.compression_method
 
-        rtt_header[4:16] = header_bytes
+        # Bytes 5-7: Padding (leave as 0)
+
+        # Bytes 8-9: Width (big-endian)
+        rtt_header[8] = (header.width >> 8) & 0xFF
+        rtt_header[9] = header.width & 0xFF
+
+        # Bytes 10-11: Height (big-endian)
+        rtt_header[10] = (header.height >> 8) & 0xFF
+        rtt_header[11] = header.height & 0xFF
+
+        # Byte 12: Depth (usually 1)
+        rtt_header[12] = 0x01
+
+        # Byte 13: Mipmap count - CRITICAL fix!
+        rtt_header[13] = header.num_mipmaps
 
         return bytes(rtt_header) + texture_data
 

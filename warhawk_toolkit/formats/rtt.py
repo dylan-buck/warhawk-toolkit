@@ -15,12 +15,16 @@ from ..utils.binary import BinaryReader
 
 
 class RTTCompressionType(IntEnum):
-    """RTT compression/format types."""
+    """RTT compression/format types.
 
-    DXT1 = 0x86  # BC1 - 4bpp, 1-bit alpha
-    DXT3 = 0x87  # BC2 - 8bpp, explicit alpha
-    DXT5 = 0x88  # BC3 - 8bpp, interpolated alpha
-    RGBA = 0x85  # Uncompressed RGBA
+    Note: Actual game files use 0x01-0x08, not 0x85-0x88 as previously assumed.
+    """
+
+    RGBA = 0x01  # Uncompressed RGBA
+    RGBA_ALT = 0x05  # Uncompressed RGBA (alternate code)
+    DXT1 = 0x06  # BC1 - 4bpp, 1-bit alpha
+    DXT3 = 0x07  # BC2 - 8bpp, explicit alpha
+    DXT5 = 0x08  # BC3 - 8bpp, interpolated alpha
 
 
 # Map RTT compression to DDS FourCC
@@ -60,7 +64,10 @@ class RTTHeader:
 
     @property
     def is_rgba(self) -> bool:
-        return self.compression_type == RTTCompressionType.RGBA
+        return self.compression_type in (
+            RTTCompressionType.RGBA,
+            RTTCompressionType.RGBA_ALT,
+        )
 
     @property
     def is_compressed(self) -> bool:
@@ -76,8 +83,10 @@ class RTTHeader:
             return 4
         elif self.compression_type in (RTTCompressionType.DXT3, RTTCompressionType.DXT5):
             return 8
+        elif self.compression_type in (RTTCompressionType.RGBA, RTTCompressionType.RGBA_ALT):
+            return 32
         else:
-            return 32  # RGBA
+            return 32  # Default to RGBA for unknown types
 
     @property
     def dds_fourcc(self) -> Optional[bytes]:

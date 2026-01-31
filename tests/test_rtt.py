@@ -7,7 +7,7 @@ from warhawk_toolkit.formats.rtt import RTTTexture, RTTCompressionType
 
 def create_rtt_header(
     magic: int = 0x80,
-    compression: int = 0x86,
+    compression: int = 0x06,  # DXT1 - changed from 0x86
     width: int = 256,
     height: int = 256,
     depth: int = 1,
@@ -118,4 +118,4 @@ class TestRTTTexture:
         rtt = RTTTexture(create_rtt_header())
         repr_str = repr(rtt)
         assert "256" in repr_str
-        assert "0x86" in repr_str
+        assert "0x06" in repr_str  # Changed from 0x86
