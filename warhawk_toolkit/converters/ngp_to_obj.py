@@ -4,10 +4,11 @@ Extracts 3D model geometry from NGP files and exports to OBJ format
 with optional MTL materials and DDS textures.
 """
 
+import math
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from .rtt_to_dds import convert_rtt_to_dds
 
@@ -197,6 +198,219 @@ def extract_faces(ngp_data: bytes, offset: int, index_count: int) -> List[Tuple[
         faces.append((v1, v2, v3))
 
     return faces
+
+
+# ============================================================================
+# Flexible Type 2 vertex extraction (variable stride support)
+# ============================================================================
+
+def decode_raw_indices(ngp_data: bytes, face_offset: int, index_count: int) -> Optional[List[int]]:
+    """Decode raw u16 indices without converting to triangles."""
+    need = face_offset + index_count * 2
+    if face_offset < 0 or need > len(ngp_data) or index_count <= 0:
+        return None
+    return [struct.unpack_from(">H", ngp_data, face_offset + i * 2)[0] for i in range(index_count)]
+
+
+def build_tris_trilist(indices: List[int]) -> List[Tuple[int, int, int]]:
+    """Build triangles from a triangle list (every 3 indices = 1 triangle)."""
+    tris = []
+    n = len(indices) - (len(indices) % 3)
+    for i in range(0, n, 3):
+        a, b, c = indices[i], indices[i + 1], indices[i + 2]
+        if a == b or b == c or a == c:
+            continue
+        tris.append((a, b, c))
+    return tris
+
+
+def build_tris_strip(indices: List[int], restart: int = 0xFFFF) -> List[Tuple[int, int, int]]:
+    """Build triangles from a triangle strip with restart index support."""
+    tris: List[Tuple[int, int, int]] = []
+    strip: List[int] = []
+
+    def flush():
+        nonlocal strip
+        if len(strip) < 3:
+            strip = []
+            return
+        flip = False
+        for i in range(len(strip) - 2):
+            a, b, c = strip[i], strip[i + 1], strip[i + 2]
+            if a == b or b == c or a == c:
+                flip = not flip
+                continue
+            tris.append((a, b, c) if not flip else (b, a, c))
+            flip = not flip
+        strip = []
+
+    for v in indices:
+        if v == restart:
+            flush()
+        else:
+            strip.append(v)
+    flush()
+    return tris
+
+
+def decode_vertices_strided(
+    ngp_data: bytes,
+    base_offset: int,
+    vertex_count: int,
+    stride: int,
+    pos_offset: int,
+    abs_limit: float = 1000.0,
+) -> Optional[List[Tuple[float, float, float]]]:
+    """Extract vertices with variable stride and position offset.
+
+    Args:
+        base_offset: Start of vertex data
+        vertex_count: Number of vertices to extract
+        stride: Bytes per vertex (12, 16, 20, 24, etc.)
+        pos_offset: Offset within each vertex where XYZ starts
+        abs_limit: Maximum allowed coordinate value
+    """
+    need = base_offset + pos_offset + (vertex_count - 1) * stride + 12
+    if base_offset < 0 or need > len(ngp_data) or stride <= 0 or vertex_count <= 0:
+        return None
+
+    vertices = []
+    for i in range(vertex_count):
+        pos = base_offset + i * stride + pos_offset
+        x = struct.unpack_from(">f", ngp_data, pos)[0]
+        y = struct.unpack_from(">f", ngp_data, pos + 4)[0]
+        z = struct.unpack_from(">f", ngp_data, pos + 8)[0]
+
+        # Validate
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
+            return None
+        if abs(x) > abs_limit or abs(y) > abs_limit or abs(z) > abs_limit:
+            return None
+
+        vertices.append((x, y, z))
+
+    return vertices
+
+
+def edge_length_squared(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    """Calculate squared edge length between two vertices."""
+    dx = a[0] - b[0]
+    dy = a[1] - b[1]
+    dz = a[2] - b[2]
+    return dx * dx + dy * dy + dz * dz
+
+
+def bbox_span(vertices: List[Tuple[float, float, float]]) -> float:
+    """Calculate bounding box span (sum of dimensions)."""
+    if not vertices:
+        return 0.0
+    xs = [v[0] for v in vertices]
+    ys = [v[1] for v in vertices]
+    zs = [v[2] for v in vertices]
+    return (max(xs) - min(xs)) + (max(ys) - min(ys)) + (max(zs) - min(zs))
+
+
+def score_mesh(
+    vertices: List[Tuple[float, float, float]],
+    triangles: List[Tuple[int, int, int]],
+    sample_limit: int = 2500,
+) -> float:
+    """Score mesh quality based on edge length consistency.
+
+    Lower score = better quality mesh.
+    Returns infinity for invalid meshes.
+    """
+    if not vertices or not triangles:
+        return float("inf")
+
+    edges: List[float] = []
+    for a, b, c in triangles[:min(len(triangles), sample_limit)]:
+        if a >= len(vertices) or b >= len(vertices) or c >= len(vertices):
+            return float("inf")
+        va, vb, vc = vertices[a], vertices[b], vertices[c]
+        edges.extend([
+            edge_length_squared(va, vb),
+            edge_length_squared(vb, vc),
+            edge_length_squared(vc, va),
+        ])
+
+    edges = [e for e in edges if e > 0 and math.isfinite(e)]
+    if len(edges) < 60:
+        return float("inf")
+
+    edges.sort()
+    median = edges[len(edges) // 2]
+    if median <= 1e-12:
+        return float("inf")
+
+    p95 = edges[int(0.95 * (len(edges) - 1))]
+    p99 = edges[int(0.99 * (len(edges) - 1))]
+
+    # Penalize abnormal bounding box sizes
+    span = bbox_span(vertices[:min(len(vertices), 4000)])
+    span_penalty = 0.0
+    if span < 0.05:
+        span_penalty += 10.0
+    if span > 8000.0:
+        span_penalty += 10.0
+
+    return (p99 / median) * 0.75 + (p95 / median) * 0.25 + span_penalty
+
+
+def autodetect_type2_layout(
+    ngp_data: bytes,
+    vertex_offset: int,
+    vertex_count: int,
+    raw_indices: List[int],
+    abs_limit: float = 1000.0,
+    min_triangles: int = 1,
+) -> Tuple[Optional[List[Tuple[float, float, float]]], List[Tuple[int, int, int]], Dict]:
+    """Auto-detect the best vertex layout for Type 2 models.
+
+    Tries multiple stride values, position offsets, and primitive types
+    to find the layout that produces the best quality mesh.
+
+    Returns (vertices, triangles, layout_metadata).
+    """
+    stride_candidates = [12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64]
+    pos_candidates = [0, 4, 8, 12, 16, 20]
+    prim_candidates = ["trilist", "strip"]
+
+    best_vertices: Optional[List[Tuple[float, float, float]]] = None
+    best_triangles: List[Tuple[int, int, int]] = []
+    best_meta: Dict = {}
+    best_score = float("inf")
+
+    for stride in stride_candidates:
+        for pos_off in pos_candidates:
+            vertices = decode_vertices_strided(
+                ngp_data, vertex_offset, vertex_count, stride, pos_off, abs_limit
+            )
+            if not vertices:
+                continue
+
+            for prim in prim_candidates:
+                if prim == "trilist":
+                    triangles = build_tris_trilist(raw_indices)
+                else:
+                    triangles = build_tris_strip(raw_indices, 0xFFFF)
+
+                if len(triangles) < min_triangles:
+                    continue
+
+                score = score_mesh(vertices, triangles)
+                if score < best_score:
+                    best_score = score
+                    best_vertices = vertices
+                    best_triangles = triangles
+                    best_meta = {
+                        "stride": stride,
+                        "pos_offset": pos_off,
+                        "primitive": prim,
+                        "score": score,
+                    }
+
+    return best_vertices, best_triangles, best_meta
 
 
 def translate_uv(val: int) -> float:
@@ -667,10 +881,13 @@ def extract_model_type2(
 
     Type 2 models use a different format than Type 1:
     - Vertex pointer at 0x24 (relative pointer)
-    - Vertices stored as float32 triplets (12 bytes each) instead of int16
+    - Vertices stored as float32 in interleaved format (variable stride)
     - Face index count at 0x2C
     - Face offset at 0x44
     - UV/normal linkers located in extended header region (+0x40 to +0x1000)
+
+    Uses flexible stride detection to handle different vertex layouts
+    (12-64 byte strides with position at various offsets).
     """
     # Type 2 has a minimum header size
     if header_offset + 0x50 > len(ngp_data):
@@ -689,46 +906,50 @@ def extract_model_type2(
     if faces_offset < 0 or faces_offset >= len(ngp_data):
         return None
 
-    # Extract faces first to determine actual vertex count from max index
-    faces = extract_faces(ngp_data, faces_offset, face_index_count)
-
-    if not faces:
+    # Decode raw indices first (needed for both trilist and strip detection)
+    raw_indices = decode_raw_indices(ngp_data, faces_offset, face_index_count)
+    if not raw_indices:
         return None
 
-    # Determine actual vertex count using improved detection
-    max_vertex_index = max(max(f) for f in faces)
-    actual_vertex_count = detect_type2_vertex_count(
-        ngp_data, vertex_offset, max_vertex_index
+    # Estimate vertex count from max index in raw data
+    max_index = max(idx for idx in raw_indices if idx != 0xFFFF)  # Exclude restart marker
+    vertex_count = max_index + 1
+
+    # Use flexible layout detection to find best stride/primitive combination
+    vertices, triangles, layout_meta = autodetect_type2_layout(
+        ngp_data, vertex_offset, vertex_count, raw_indices,
+        abs_limit=1000.0, min_triangles=1
     )
 
-    # Type 2 models use float32 vertices
-    vertices = extract_vertices_float32(ngp_data, vertex_offset, max_count=actual_vertex_count + 100)
+    # If autodetect failed, fall back to simple fixed-stride approach
+    if not vertices or not triangles:
+        # Try the old fixed 12-byte stride method as fallback
+        vertices = extract_vertices_float32(ngp_data, vertex_offset, max_count=vertex_count + 100)
+        if vertices:
+            # Use trilist as fallback
+            triangles = build_tris_trilist(raw_indices)
 
-    if not vertices:
+    if not vertices or not triangles:
         return None
 
-    # Trim vertices to actual count needed
-    if len(vertices) > actual_vertex_count:
-        vertices = vertices[:actual_vertex_count]
-
-    # Filter out faces that reference out-of-bounds vertices
-    vertex_count = len(vertices)
+    # Convert to 1-indexed faces for OBJ format
     valid_faces = []
-    for f in faces:
-        if f[0] <= vertex_count and f[1] <= vertex_count and f[2] <= vertex_count:
-            valid_faces.append(f)
+    vertex_count = len(vertices)
+    for a, b, c in triangles:
+        # Triangles from autodetect are 0-indexed, convert to 1-indexed
+        if a < vertex_count and b < vertex_count and c < vertex_count:
+            valid_faces.append((a + 1, b + 1, c + 1))
 
     if not valid_faces:
         return None
 
     # Extract UVs from Type 2 linker structure
-    # Type 2 rigged meshes typically use UV1 for texture mapping (including chroma)
     uvs = extract_uvs_type2(ngp_data, vram_data, header_offset, vertex_count, LINKER_UV1)
 
     # Also try to extract UV2 if present
     uvs2 = extract_uvs_type2(ngp_data, vram_data, header_offset, vertex_count, LINKER_UV2)
 
-    # Extract normals using the new Type 2 normals function
+    # Extract normals using the Type 2 normals function
     normals = extract_normals_type2(ngp_data, vram_data, header_offset, vertex_count)
 
     # Find associated texture
