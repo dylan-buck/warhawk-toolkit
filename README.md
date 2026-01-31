@@ -110,6 +110,7 @@ warhawk full game.psarc
 | `warhawk ngp` | Extract textures from a single NGP file |
 | `warhawk rtt2dds` | Convert a single RTT texture to DDS |
 | `warhawk loc` | Extract localization strings |
+| `warhawk audit` | Analyze extraction coverage of NGP files |
 | `warhawk uv-compare` | Diagnose UV coordinate issues |
 
 ### Preview Archive Contents
@@ -153,6 +154,16 @@ warhawk uv-compare nemesis.ngp
 ```
 
 This shows whether UV1 and UV2 differ and by how much.
+
+### Audit Extraction Coverage
+
+Check how many models/textures can be extracted from NGP files:
+
+```bash
+warhawk audit model.ngp                    # Single file
+warhawk audit ./extracted -r               # Recursive scan
+warhawk audit ./extracted -r --json        # JSON output for comparison
+```
 
 ### Extract Localization
 
