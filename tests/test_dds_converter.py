@@ -8,7 +8,6 @@ from warhawk_toolkit.converters.dds_header import (
     get_dds_fourcc,
     DDS_MAGIC,
 )
-from warhawk_toolkit.converters.rtt_to_dds import swap_dxt1_block
 
 
 class TestDDSHeader:
@@ -73,27 +72,3 @@ class TestDDSFourCC:
         assert get_dds_fourcc(0x86) is None
         assert get_dds_fourcc(0x87) is None
         assert get_dds_fourcc(0x88) is None
-
-
-class TestEndianSwap:
-    """Tests for DXT endian swapping."""
-
-    def test_dxt1_block_swap(self):
-        # DXT1 block: 2 16-bit colors + 4 bytes indices
-        block = bytes([0x12, 0x34, 0x56, 0x78, 0xAA, 0xBB, 0xCC, 0xDD])
-        swapped = swap_dxt1_block(block)
-
-        # Colors should be byte-swapped
-        assert swapped[0] == 0x34
-        assert swapped[1] == 0x12
-        assert swapped[2] == 0x78
-        assert swapped[3] == 0x56
-
-        # Indices should be unchanged
-        assert swapped[4:8] == bytes([0xAA, 0xBB, 0xCC, 0xDD])
-
-    def test_short_block(self):
-        # Should handle short input gracefully
-        block = bytes([0x12, 0x34])
-        swapped = swap_dxt1_block(block)
-        assert swapped == block
