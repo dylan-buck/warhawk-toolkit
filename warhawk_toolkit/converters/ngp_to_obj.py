@@ -105,20 +105,31 @@ def find_models(ngp_data: bytes) -> Iterator[Tuple[int, int, int]]:
                     continue
 
         # Type 2: Rigged Mesh - magic 0x00000002
-        # These have different structure, vertex pointer at 0x24 is relative
+        # These have different structure, with a relative pointer at +0x04
         if magic == b'\x00\x00\x00\x02':
-            # Validate this looks like a Type 2 header by checking reasonable values
-            # Type 2 headers have face offset at 0x44 which should be non-zero
             if i + 0x48 <= data_len:
-                face_offset = struct.unpack_from(">I", ngp_data, i + 0x44)[0]
-                if 0 < face_offset < data_len:
-                    # Estimate header length - Type 2 has fixed 0x50 base + linkers
-                    # For now, use a reasonable fixed size since linker count location differs
-                    header_length = 0x50
-                    if i + header_length <= data_len:
-                        yield i, header_length, 2
-                        i += header_length
-                        continue
+                # Validate relative pointer at +0x04 points within file bounds
+                # This filters out false positives where 0x00000002 appears in data
+                rel_ptr = struct.unpack_from(">I", ngp_data, i + 0x04)[0]
+                ptr_target = i + 4 + rel_ptr
+
+                # Valid Type 2 models have:
+                # 1. Relative pointer at +0x04 > 0x100000 (real models point to distant data
+                #    like texture/VRAM area, typically >1MB offset from header)
+                #    False positives from index data have small values like 0x40000 or 0xFFFF
+                # 2. Pointer target within file bounds
+                # 3. Face index count at +0x2C that's reasonable (< 100000)
+                # 4. Face offset at +0x44 that's non-zero and valid
+                if rel_ptr > 0x100000 and ptr_target < data_len:
+                    face_index_count = struct.unpack_from(">I", ngp_data, i + 0x2C)[0]
+                    face_offset = struct.unpack_from(">I", ngp_data, i + 0x44)[0]
+                    if face_index_count < 100000 and 0 < face_offset < data_len:
+                        # Estimate header length - Type 2 has fixed 0x50 base + linkers
+                        header_length = 0x50
+                        if i + header_length <= data_len:
+                            yield i, header_length, 2
+                            i += header_length
+                            continue
 
         i += 4
 
@@ -205,11 +216,58 @@ def extract_faces(ngp_data: bytes, offset: int, index_count: int) -> List[Tuple[
 # ============================================================================
 
 def decode_raw_indices(ngp_data: bytes, face_offset: int, index_count: int) -> Optional[List[int]]:
-    """Decode raw u16 indices without converting to triangles."""
+    """Decode raw u16 indices without converting to triangles.
+
+    Includes validation to detect when index data becomes garbage (e.g., when
+    face_index_count in the header is wrong and includes non-index data).
+    """
     need = face_offset + index_count * 2
     if face_offset < 0 or need > len(ngp_data) or index_count <= 0:
         return None
-    return [struct.unpack_from(">H", ngp_data, face_offset + i * 2)[0] for i in range(index_count)]
+
+    indices = []
+    running_max = 0
+    last_valid_pos = 0
+    zero_count = 0
+
+    for i in range(index_count):
+        idx = struct.unpack_from(">H", ngp_data, face_offset + i * 2)[0]
+        indices.append(idx)
+
+        # Track consecutive zeros (padding before garbage data)
+        if idx == 0:
+            zero_count += 1
+        else:
+            zero_count = 0
+
+        # Track the running max index (excluding restart marker and zeros)
+        if idx != 0xFFFF and idx != 0:
+            if idx > running_max:
+                # Check for sudden unreasonable jumps indicating garbage data
+                # Two conditions to catch both large and small models:
+                # 1. Large models: absolute jump > 10000 from running max
+                # 2. Small models: index > 10000 and more than 100x larger than running max
+                is_garbage = False
+                if running_max > 0:
+                    jump = idx - running_max
+                    if jump > 10000:
+                        is_garbage = True
+                    elif idx > 10000 and idx > running_max * 100:
+                        is_garbage = True
+                elif idx > 50000:  # No valid indices yet, but this is suspiciously high
+                    is_garbage = True
+
+                if is_garbage:
+                    # Truncate to before the zeros/garbage
+                    truncate_pos = last_valid_pos
+                    # Also remove any trailing zeros before the garbage
+                    while truncate_pos > 0 and indices[truncate_pos - 1] == 0:
+                        truncate_pos -= 1
+                    return indices[:truncate_pos] if truncate_pos > 0 else None
+                running_max = idx
+            last_valid_pos = i + 1
+
+    return indices
 
 
 def build_tris_trilist(indices: List[int]) -> List[Tuple[int, int, int]]:
@@ -335,7 +393,9 @@ def score_mesh(
         ])
 
     edges = [e for e in edges if e > 0 and math.isfinite(e)]
-    if len(edges) < 60:
+    # Require at least 9 edges (3 triangles worth) for scoring
+    # Previously required 60, which rejected small but valid models
+    if len(edges) < 9:
         return float("inf")
 
     edges.sort()
