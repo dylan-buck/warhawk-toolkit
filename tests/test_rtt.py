@@ -13,7 +13,14 @@ def create_rtt_header(
     depth: int = 1,
     mipmaps: int = 1,
 ) -> bytes:
-    """Create a minimal RTT header for testing."""
+    """Create a minimal RTT header for testing.
+
+    Matches game RTT format per JMcKiern/warhawk-reversing:
+    - Byte 12: 0x00
+    - Byte 13: 0x01 (depth marker)
+    - Byte 14: mipmap count
+    - Byte 15: 0x02
+    """
     header = bytearray(128)
     header[0] = magic
     header[4] = compression
@@ -23,10 +30,13 @@ def create_rtt_header(
     # Height (big-endian)
     header[10] = (height >> 8) & 0xFF
     header[11] = height & 0xFF
-    # Depth
-    header[12] = depth
-    # Mipmaps
-    header[13] = mipmaps
+    # Byte 12: 0x00 (already zero)
+    # Byte 13: depth marker (0x01)
+    header[13] = depth
+    # Byte 14: Mipmaps
+    header[14] = mipmaps
+    # Byte 15: format marker (0x02)
+    header[15] = 0x02
     return bytes(header)
 
 

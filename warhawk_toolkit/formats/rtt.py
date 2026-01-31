@@ -131,10 +131,13 @@ class RTTTexture:
         # Bytes 10-11: Height (big-endian)
         height = reader.read_u16()
 
-        # Byte 12: Depth (for 3D textures)
+        # Byte 12: Usually 0x00 in game files
+        reader.skip(1)
+
+        # Byte 13: Usually 0x01 in game files (may indicate depth=1)
         depth = reader.read_u8()
 
-        # Byte 13: Mipmap count
+        # Byte 14: Mipmap count (confirmed via JMcKiern's rtt2dds.py)
         mipmap_count = reader.read_u8()
 
         self._header = RTTHeader(

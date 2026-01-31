@@ -217,16 +217,19 @@ class NGPFile:
     def build_rtt_data(self, index: int) -> Optional[bytes]:
         """Build a complete RTT file from texture header and data.
 
-        RTT header layout (128 bytes):
+        RTT header layout (128 bytes) - matches game format per JMcKiern/warhawk-reversing:
         - Byte 0: 0x80 (magic)
         - Bytes 1-3: size minus 4 (big-endian, 3 bytes)
         - Byte 4: compression_method
-        - Bytes 5-7: padding
+        - Byte 5: 0x00
+        - Bytes 6-7: image_format (big-endian)
         - Bytes 8-9: width (big-endian)
         - Bytes 10-11: height (big-endian)
-        - Byte 12: depth (usually 1)
-        - Byte 13: mipmap count  <-- CRITICAL: must be at byte 13!
-        - Bytes 14-127: padding
+        - Byte 12: 0x00
+        - Byte 13: 0x01 (depth marker)
+        - Byte 14: mipmap count
+        - Byte 15: 0x02
+        - Bytes 16-127: padding
         """
         if index < 0 or index >= len(self._texture_headers):
             return None
@@ -253,7 +256,11 @@ class NGPFile:
         # Byte 4: Compression method
         rtt_header[4] = header.compression_method
 
-        # Bytes 5-7: Padding (leave as 0)
+        # Byte 5: 0x00 (already zero)
+
+        # Bytes 6-7: Image format (big-endian)
+        rtt_header[6] = (header.image_format >> 8) & 0xFF
+        rtt_header[7] = header.image_format & 0xFF
 
         # Bytes 8-9: Width (big-endian)
         rtt_header[8] = (header.width >> 8) & 0xFF
@@ -263,11 +270,16 @@ class NGPFile:
         rtt_header[10] = (header.height >> 8) & 0xFF
         rtt_header[11] = header.height & 0xFF
 
-        # Byte 12: Depth (usually 1)
-        rtt_header[12] = 0x01
+        # Byte 12: 0x00 (already zero)
 
-        # Byte 13: Mipmap count - CRITICAL fix!
-        rtt_header[13] = header.num_mipmaps
+        # Byte 13: 0x01 (depth/format marker)
+        rtt_header[13] = 0x01
+
+        # Byte 14: Mipmap count
+        rtt_header[14] = header.num_mipmaps
+
+        # Byte 15: 0x02 (format marker)
+        rtt_header[15] = 0x02
 
         return bytes(rtt_header) + texture_data
 
